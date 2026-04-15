@@ -1,0 +1,15 @@
+{
+  "name": "stock-sentinel-backend",
+  "version": "1.0.0",
+  "description": "Stock Sentinel 后端代理服务",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "pm2": "pm2 start ecosystem.config.cjs"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1"
+  }
+}
