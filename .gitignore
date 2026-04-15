@@ -11,7 +11,7 @@ node_modules
 dist
 dist-ssr
 *.local
-release/
+release
 
 # Editor directories and files
 .vscode/*
@@ -23,3 +23,7 @@ release/
 *.njsproj
 *.sln
 *.sw?
+
+# 日志
+*.log
+npm-debug.log*
