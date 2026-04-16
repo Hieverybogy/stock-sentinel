@@ -150,11 +150,15 @@ function App() {
       if (stockData && stockData.price > 0) {
         const name = A_STOCK_NAMES[code] || stockData.name || code
         stockData.name = name
-        
         setCurrentStock(stockData)
         setLastUpdate(new Date())
         setConnected(true)
         setError(null)
+
+        // 更新菜单栏图标旁显示
+        if (isElectronApp && window.electronAPI) {
+          window.electronAPI.updateDock(stockData).catch(() => {})
+        }
 
         const newHistory = [...priceHistory, { 
           price: stockData.price, 

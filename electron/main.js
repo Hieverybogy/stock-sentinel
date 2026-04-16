@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
+import { createCanvas, loadImage } from 'canvas';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,9 +12,66 @@ const __dirname = path.dirname(__filename);
 // Global references
 let mainWindow = null;
 let tray = null;
+let trayIconPath = '';
 const isDev = !app.isPackaged;
 const API_PORT = 7099;
 const API_TARGET = 'http://47.113.228.135:7099';
+
+// 合成 tray 图标 + 文字图片
+async function compositeTrayImage(stockData) {
+  const { code, price, changePercent } = stockData;
+  const sign = changePercent >= 0 ? '+' : '';
+  const changeStr = `${sign}${changePercent.toFixed(2)}%`;
+
+  // 读取原始 tray 图标
+  const resourcePath = app.isPackaged
+    ? process.resourcesPath
+    : path.join(__dirname, '../public');
+  const iconPath = path.join(resourcePath, 'tray-icon.png');
+  let baseIcon;
+  try {
+    baseIcon = await loadImage(iconPath);
+  } catch {
+    return null;
+  }
+
+  // 图标尺寸 22x22，左边距 8px，上下居中
+  const iconSize = 22;
+  const iconMarginLeft = 8;
+
+  // 文字区：图标右边，左对齐，整体垂直居中于图标
+  const lineHeight = 11;
+  const textMarginLeft = iconMarginLeft + iconSize + 6;
+  const totalTextHeight = lineHeight * 2; // 两行文字
+  const totalHeight = Math.max(iconSize, totalTextHeight) + 2;
+  const offset_y = 1.5
+
+  const canvas = createCanvas(textMarginLeft + 60, totalHeight);
+  const ctx = canvas.getContext('2d');
+
+  // 透明背景
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // 画图标（垂直居中）
+  const iconOffsetY = Math.floor((totalHeight - iconSize) / 2);
+  ctx.drawImage(baseIcon, iconMarginLeft, iconOffsetY, iconSize, iconSize);
+
+  // 文字设置：左对齐，靠近图标，垂直与图标居中
+  ctx.font = 'bold 14px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillStyle = '#ffffff';
+  ctx.textBaseline = 'top';
+
+  // 第一行：股票代码
+  const textOffsetY = Math.floor((totalHeight - totalTextHeight) / 2) + offset_y;
+  ctx.fillText(code, textMarginLeft, textOffsetY);
+
+  // 第二行：价格 + 涨跌幅
+  const priceStr = `${price.toFixed(2)}  ${changeStr}`;
+  ctx.fillStyle = Number(changePercent) > 0 ? '#ff0000' : '#00ff00';
+  ctx.fillText(priceStr, textMarginLeft, textOffsetY + lineHeight + offset_y);
+
+  return canvas.toBuffer('image/png');
+}
 
 // 本地代理服务
 let proxyServer = null;
@@ -156,12 +214,13 @@ function createWindow() {
 function createTray() {
   // Create a simple 16x16 tray icon
   // extraResources 会把文件放到 resources/ 目录
-  const resourcePath = app.isPackaged 
-    ? process.resourcesPath 
+  const resourcePath = app.isPackaged
+    ? process.resourcesPath
     : path.join(__dirname, '../public');
-  
+
   const iconPath = path.join(resourcePath, 'tray-icon.png');
-  
+  trayIconPath = iconPath;
+
   // Create a default icon if not exists
   let trayIcon;
   try {
@@ -227,6 +286,43 @@ ipcMain.handle('show-notification', async (event, { title, body }) => {
   return false;
 });
 
+// IPC handler: update tray image with stock info (图标+文字合成)
+ipcMain.handle('update-dock', async (event, stockData) => {
+  if (!tray) return false;
+
+  const { code, price, changePercent } = stockData;
+  const sign = changePercent >= 0 ? '+' : '';
+  const changeStr = `${sign}${changePercent.toFixed(2)}%`;
+
+  // 合成图标 + 文字图片
+  const buffer = await compositeTrayImage(stockData);
+  if (buffer) {
+    const compositeIcon = nativeImage.createFromBuffer(buffer);
+    tray.setImage(compositeIcon);
+  }
+
+  // Dock badge: 仅在 dock 可用时设置
+  if (process.platform === 'darwin' && app.dock && typeof app.dock.setBadge === 'function') {
+    app.dock.setBadge(changeStr);
+  }
+
+  return true;
+});
+
+// IPC handler: clear tray (恢复原始图标)
+ipcMain.handle('clear-dock', async () => {
+  if (tray && trayIconPath) {
+    const originalIcon = nativeImage.createFromPath(trayIconPath);
+    if (!originalIcon.isEmpty()) {
+      tray.setImage(originalIcon);
+    }
+  }
+  if (process.platform === 'darwin' && app.dock && typeof app.dock.setBadge === 'function') {
+    app.dock.setBadge('');
+  }
+  return true;
+});
+
 // App ready
 app.whenReady().then(() => {
   console.log('App ready, creating window...');
@@ -234,7 +330,7 @@ app.whenReady().then(() => {
   // startProxyServer();
   createWindow();
   createTray();
-  
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
