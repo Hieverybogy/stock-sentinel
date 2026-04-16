@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { createChart, CrosshairMode, CandlestickSeries, HistogramSeries, LineSeries } from 'lightweight-charts'
 
 // A股股票名称映射
 const A_STOCK_NAMES = {
@@ -18,6 +19,8 @@ const A_STOCK_NAMES = {
   '600016': '民生银行',
   '600000': '浦发银行',
   '601166': '兴业银行',
+  '601099': '太平洋',
+  '601991': '大唐发电',
 }
 
 // 检测是否在 Electron 环境中
@@ -76,6 +79,45 @@ const getUpDownClass = (percent) => {
   return parseFloat(percent) >= 0 ? 'up' : 'down'
 }
 
+// 评分条组件
+function ScoreBar({ label, value, desc, tip, onTip }) {
+  const color = value >= 70 ? '#00c853'
+    : value >= 50 ? '#43a047'
+    : value >= 35 ? '#fb8c00'
+    : '#e53935'
+  return (
+    <div
+      className="score-bar-item"
+      onMouseEnter={(e) => tip && onTip({ visible: true, x: e.clientX, y: e.clientY, content: tip })}
+      onMouseMove={(e) => tip && onTip(prev => ({ ...prev, x: e.clientX, y: e.clientY }))}
+      onMouseLeave={() => tip && onTip(prev => ({ ...prev, visible: false }))}
+    >
+      <div className="score-bar-header">
+        <span className="score-bar-label">{label}</span>
+        <span className="score-bar-value" style={{ color }}>{value}</span>
+      </div>
+      <div className="score-bar-track">
+        <div className="score-bar-fill" style={{ width: `${value}%`, background: color }} />
+      </div>
+      <div className="score-bar-desc">{desc}</div>
+    </div>
+  )
+}
+
+// 指标单元格（带tooltip）
+function IndicatorCell({ label, value, tip, onTip }) {
+  return (
+    <span
+      className="indicator-item"
+      onMouseEnter={(e) => tip && onTip({ visible: true, x: e.clientX, y: e.clientY, content: tip })}
+      onMouseMove={(e) => tip && onTip(prev => ({ ...prev, x: e.clientX, y: e.clientY }))}
+      onMouseLeave={() => tip && onTip(prev => ({ ...prev, visible: false }))}
+    >
+      {label} <strong>{value}</strong>
+    </span>
+  )
+}
+
 // 本地代理服务器地址
 const PROXY_URL = '/api'
 
@@ -93,6 +135,14 @@ function App() {
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
   const [isElectronApp, setIsElectronApp] = useState(false)
+  const [analyzeData, setAnalyzeData] = useState(null)
+  const [analyzing, setAnalyzing] = useState(false)
+  const [chartData, setChartData] = useState(null)
+  const chartContainerRef = useRef(null)
+  const chartInstanceRef = useRef(null)
+  const candleSeriesRef = useRef(null)
+  const volumeSeriesRef = useRef(null)
+  const [tooltip, setTooltip] = useState({ visible: false, x: 0, y: 0, content: '' })
   
   const rapidCheckRef = useRef(null)
   const fiveMinCheckRef = useRef(null)
@@ -150,6 +200,9 @@ function App() {
       if (stockData && stockData.price > 0) {
         const name = A_STOCK_NAMES[code] || stockData.name || code
         stockData.name = name
+        stockData.increase = formatPercent(
+          stockData.changePercent / (stockData.price - stockData.changePercent) * 100
+        )
         setCurrentStock(stockData)
         setLastUpdate(new Date())
         setConnected(true)
@@ -159,6 +212,10 @@ function App() {
         if (isElectronApp && window.electronAPI) {
           window.electronAPI.updateDock(stockData).catch(() => {})
         }
+
+        // 加载K线图表和技术分析数据
+        fetchChartData()
+        fetchAnalyzeData()
 
         const newHistory = [...priceHistory, { 
           price: stockData.price, 
@@ -225,19 +282,55 @@ function App() {
     }
   }, [stockCode, priceHistory, threshold, isElectronApp])
 
+  // 获取股票技术分析
+  const fetchAnalyzeData = useCallback(async () => {
+    if (!stockCode.trim()) return
+    try {
+      setAnalyzing(true)
+      const proxyUrl = getProxyUrl()
+      const response = await fetch(`${proxyUrl}/analyze/${stockCode.trim()}?days=120`)
+      if (response.ok) {
+        const data = await response.json()
+        setAnalyzeData(data)
+      }
+    } catch (err) {
+      console.error('Analyze error:', err)
+    } finally {
+      setAnalyzing(false)
+    }
+  }, [stockCode])
+
+  // 获取K线图表数据
+  const fetchChartData = useCallback(async () => {
+    if (!stockCode.trim()) return
+    try {
+      const proxyUrl = getProxyUrl()
+      const response = await fetch(`${proxyUrl}/history/${stockCode.trim()}?chart=true&days=500`)
+      if (response.ok) {
+        const data = await response.json()
+        setChartData(data)
+      }
+    } catch (err) {
+      console.error('Chart data error:', err)
+    }
+  }, [stockCode])
+
   // 提交股票代码
   const handleSubmit = (e) => {
     e.preventDefault()
     if (!stockCode.trim()) return
-    
+
     setLogs([])
     setPriceHistory([])
     setError(null)
+    setAnalyzeData(null)
+    setChartData(null)
     lastAlertRef.current = {}
     fetchStockData()
+    fetchAnalyzeData()
+    fetchChartData()
   }
 
-  // 10秒极速检查
   useEffect(() => {
     if (!stockCode.trim()) return
 
@@ -274,7 +367,116 @@ function App() {
     }
   }, [stockCode, currentStock])
 
-  // 倒计时
+  // 初始化K线图表
+  useEffect(() => {
+    if (!chartContainerRef.current || !chartData) return
+
+    // 清理旧图表
+    if (chartInstanceRef.current) {
+      chartInstanceRef.current.remove()
+      chartInstanceRef.current = null
+      candleSeriesRef.current = null
+      volumeSeriesRef.current = null
+    }
+
+    const container = chartContainerRef.current
+    const chart = createChart(container, {
+      width: container.clientWidth,
+      height: 280,
+      layout: {
+        background: { color: '#2C2C2E' },
+        textColor: '#98989D',
+        fontSize: 11
+      },
+      grid: {
+        vertLines: { color: 'rgba(255,255,255,0.05)' },
+        horzLines: { color: 'rgba(255,255,255,0.05)' }
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: { color: 'rgba(255,255,255,0.3)', width: 1, style: 2 },
+        horzLine: { color: 'rgba(255,255,255,0.3)', width: 1, style: 2 }
+      },
+      rightPriceScale: {
+        borderColor: 'rgba(255,255,255,0.1)'
+      },
+      timeScale: {
+        borderColor: 'rgba(255,255,255,0.1)',
+        timeVisible: true,
+        secondsVisible: false,
+        rightOffset: 5,
+        barSpacing: 10
+      },
+      handleScale: { mouseWheel: true, pinch: true },
+      handleScroll: { mouseWheel: true, pressedMouseMove: true }
+    })
+
+    chartInstanceRef.current = chart
+
+    // 主K线 (v5 API)
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: '#FF453A',
+      downColor: '#32D74B',
+      borderUpColor: '#FF453A',
+      borderDownColor: '#32D74B',
+      wickUpColor: '#FF453A',
+      wickDownColor: '#32D74B'
+    })
+    candleSeries.setData(chartData.candles)
+    candleSeriesRef.current = candleSeries
+
+    // 成交量柱 (v5 API)
+    const volumeSeries = chart.addSeries(HistogramSeries, {
+      priceFormat: { type: 'volume' },
+      priceScaleId: 'volume'
+    })
+    chart.priceScale('volume').applyOptions({
+      scaleMargins: { top: 0.8, bottom: 0 }
+    })
+    volumeSeries.setData(chartData.volumes)
+    volumeSeriesRef.current = volumeSeries
+
+    // 均线 (v5 API)
+    if (chartData.ma5.length > 0) {
+      chart.addSeries(LineSeries, { color: '#FFD60A', lineWidth: 1, priceLineVisible: false, lastValueVisible: false })
+        .setData(chartData.ma5)
+    }
+    if (chartData.ma10.length > 0) {
+      chart.addSeries(LineSeries, { color: '#0A84FF', lineWidth: 1, priceLineVisible: false, lastValueVisible: false })
+        .setData(chartData.ma10)
+    }
+    if (chartData.ma20.length > 0) {
+      chart.addSeries(LineSeries, { color: '#bf5af2', lineWidth: 1, priceLineVisible: false, lastValueVisible: false })
+        .setData(chartData.ma20)
+    }
+
+    // 默认显示近两个月，其余可拖动缩放查看
+    const lastCandle = chartData.candles[chartData.candles.length - 1]
+    if (lastCandle && lastCandle.time) {
+      chart.timeScale().setVisibleRange({
+        from: lastCandle.time - 126 * 86400,
+        to: lastCandle.time + 5 * 86400
+      })
+    } else {
+      chart.timeScale().fitContent()
+    }
+
+    // 响应窗口宽度
+    const resizeObserver = new ResizeObserver(() => {
+      if (chartInstanceRef.current && chartContainerRef.current) {
+        chartInstanceRef.current.applyOptions({ width: chartContainerRef.current.clientWidth })
+      }
+    })
+    resizeObserver.observe(container)
+
+    return () => {
+      resizeObserver.disconnect()
+      if (chartInstanceRef.current) {
+        chartInstanceRef.current.remove()
+        chartInstanceRef.current = null
+      }
+    }
+  }, [chartData])
   useEffect(() => {
     if (!stockCode.trim()) return
 
@@ -372,6 +574,151 @@ function App() {
           </div>
         )}
 
+        {/* 技术分析卡片 */}
+        {currentStock && (
+          <div className="analyze-card">
+            <div className="analyze-header">
+              <div className="analyze-title">
+                <span>📊</span>
+                <h3>技术分析</h3>
+                {analyzing && <span className="analyzing-tag">分析中...</span>}
+                {!analyzing && analyzeData && (
+                  <button className="refresh-analyze-btn" onClick={fetchAnalyzeData}>
+                    刷新
+                  </button>
+                )}
+              </div>
+              {analyzeData && (
+                <div className="analyze-level-badge" style={{ background: analyzeData.level.color }}>
+                  {analyzeData.level.label}
+                </div>
+              )}
+            </div>
+
+            {!analyzeData && !analyzing && (
+              <div className="analyze-loading">
+                <p>正在加载技术分析数据...</p>
+              </div>
+            )}
+
+            {analyzeData && (
+              <>
+                {/* 综合评分 */}
+                <div className="analyze-total-section">
+                  <div className="total-score" style={{ color: analyzeData.level.color }}>
+                    {analyzeData.score.total}
+                  </div>
+                  <div className="total-desc">
+                    <div className="total-label">综合评分</div>
+                    <div className="total-level" style={{ color: analyzeData.level.color }}>
+                      {analyzeData.level.label}
+                    </div>
+                    <div className="total-sub">{analyzeData.level.desc}</div>
+                  </div>
+                </div>
+
+                {/* 五维评分条 */}
+                <div className="score-bars">
+                  <ScoreBar label="趋势" value={analyzeData.score.trend} desc="均线排列"
+                    tip={`权重30%｜MA5>MA10>MA20>MA60 各+25分\n均线斜率为正各+5分（短期+中期方向）\n满分100分，当前得分：${analyzeData.score.trend}`}
+                    onTip={setTooltip} />
+                  <ScoreBar label="动量" value={analyzeData.score.momentum} desc="RSI/MACD"
+                    tip={`权重25%｜RSI(14日)超卖<30得50分\nMACD金叉(DIF>DEA)+15，DIF>0+10\n5日涨幅5%~20%得10分\n满分100分，当前得分：${analyzeData.score.momentum}`}
+                    onTip={setTooltip} />
+                  <ScoreBar label="波动" value={analyzeData.score.volatility} desc="布林带/ATR"
+                    tip={`权重20%｜ATR相对波动<1.5%得40分（稳定）\n布林带收口得30分（酝酿突破）\n价格在布林带中间区域得20分\n满分100分，当前得分：${analyzeData.score.volatility}`}
+                    onTip={setTooltip} />
+                  <ScoreBar label="量能" value={analyzeData.score.volume} desc="量价配合"
+                    tip={`权重15%｜量比>1.5得40分（放量）\n上涨放量+20分，下跌缩量+15分\n量价背离（价涨量缩）仅得5分\n满分100分，当前得分：${analyzeData.score.volume}`}
+                    onTip={setTooltip} />
+                  <ScoreBar label="位置" value={analyzeData.score.position} desc="价格区间"
+                    tip={`权重10%｜近60日区间的相对位置\n<30%低位得50分（买入区间）\n>85%高位得10分（风险积累）\n满分100分，当前得分：${analyzeData.score.position}`}
+                    onTip={setTooltip} />
+                </div>
+
+                {/* 关键指标 */}
+                <div className="analyze-indicators">
+                  <div className="indicator-group">
+                    <div className="indicator-title">均线</div>
+                    <div className="indicator-values">
+                      <IndicatorCell label="MA5" value={analyzeData.score.details.ma5}
+                        tip="5日简单移动平均线，反映短期价格趋势方向"
+                        onTip={setTooltip} />
+                      <IndicatorCell label="MA10" value={analyzeData.score.details.ma10}
+                        tip="10日简单移动平均线，短中期过渡均线"
+                        onTip={setTooltip} />
+                      <IndicatorCell label="MA20" value={analyzeData.score.details.ma20}
+                        tip="20日简单移动平均线，中期重要支撑/压力线"
+                        onTip={setTooltip} />
+                      {analyzeData.score.details.ma60 && (
+                        <IndicatorCell label="MA60" value={analyzeData.score.details.ma60}
+                          tip="60日简单移动平均线，中长期趋势判断基准"
+                          onTip={setTooltip} />
+                      )}
+                    </div>
+                  </div>
+                  <div className="indicator-group">
+                    <div className="indicator-title">MACD</div>
+                    <div className="indicator-values">
+                      <span className={`indicator-item ${analyzeData.score.details.macd.bar === '红' ? 'up' : 'down'}`}>
+                        {analyzeData.score.details.macd.bar}柱
+                      </span>
+                      <IndicatorCell label="DIF" value={analyzeData.score.details.macd.dif}
+                        tip="MACD快线（EMA12-EMA26），DIF上穿DEA形成金叉买入信号"
+                        onTip={setTooltip} />
+                      <IndicatorCell label="DEA" value={analyzeData.score.details.macd.dea}
+                        tip="MACD慢线（9日DIF均值），对DIF有支撑/压力作用"
+                        onTip={setTooltip} />
+                    </div>
+                  </div>
+                  <div className="indicator-group">
+                    <div className="indicator-title">其他指标</div>
+                    <div className="indicator-values">
+                      <IndicatorCell label="RSI" value={analyzeData.score.details.rsi}
+                        tip={`RSI(14日)：衡量涨跌力量对比\n<30超卖（买入机会），>70超买（注意风险）\n当前RSI：${analyzeData.score.details.rsi}`}
+                        onTip={setTooltip} />
+                      <IndicatorCell label="ATR" value={analyzeData.score.details.atr}
+                        tip={`真实波幅均值(14日)，衡量价格波动剧烈程度\nATR百分比：${analyzeData.score.details.atrPct}%\nATR越大波动越剧烈，当前属于${analyzeData.score.details.atrPct < 1.5 ? '低' : analyzeData.score.details.atrPct < 2.5 ? '中' : '高'}波动`}
+                        onTip={setTooltip} />
+                      <IndicatorCell label="量比" value={`${analyzeData.score.details.volRatio}x`}
+                        tip={`当日成交量 / 20日均量\n>1.5倍为明显放量，>2倍为巨量\n当前量比：${analyzeData.score.details.volRatio}x（${analyzeData.score.details.volRatio > 1.5 ? '放量' : analyzeData.score.details.volRatio > 0.8 ? '正常' : '缩量'}）`}
+                        onTip={setTooltip} />
+                    </div>
+                  </div>
+                  <div className="indicator-group">
+                    <div className="indicator-title">布林带</div>
+                    <div className="indicator-values">
+                      <span className="indicator-item up">上轨 <strong>{analyzeData.score.details.bb.upper}</strong></span>
+                      <span className="indicator-item">中轨 <strong>{analyzeData.score.details.bb.middle}</strong></span>
+                      <span className="indicator-item down">下轨 <strong>{analyzeData.score.details.bb.lower}</strong></span>
+                      <IndicatorCell label="带宽" value={`${analyzeData.score.details.bb.width}%`}
+                        tip={`布林带宽度指标，反映市场波动率变化\n带宽收窄（<历史均值）：酝酿突破行情\n带宽放大：趋势延续或反转信号\n当前带宽：${analyzeData.score.details.bb.width}%`}
+                        onTip={setTooltip} />
+                    </div>
+                  </div>
+                </div>
+
+                {/* 完整K线图表 */}
+                <div className="chart-container">
+                  <div className="chart-header">
+                    <span className="chart-title">K线走势</span>
+                    <div className="chart-legend">
+                      <span className="legend-item ma5">MA5</span>
+                      <span className="legend-item ma10">MA10</span>
+                      <span className="legend-item ma20">MA20</span>
+                    </div>
+                    <button className="refresh-chart-btn" onClick={fetchChartData}>刷新</button>
+                  </div>
+                  {!chartData && !analyzing && (
+                    <div className="chart-loading">加载中...</div>
+                  )}
+                  <div ref={chartContainerRef} className="chart-wrapper" />
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {/* 空状态 */}
         {!currentStock && !error && (
           <div className="price-card">
@@ -463,6 +810,21 @@ function App() {
           </div>
         </div>
       </div>
+
+      {/* 指标说明悬浮提示 */}
+      {tooltip.visible && (
+        <div
+          className="indicator-tooltip"
+          style={{
+            left: tooltip.x + 14,
+            top: tooltip.y - 10,
+          }}
+        >
+          {tooltip.content.split('\n').map((line, i) => (
+            <div key={i}>{line}</div>
+          ))}
+        </div>
+      )}
 
       {/* 状态栏 */}
       <div className="status-bar">

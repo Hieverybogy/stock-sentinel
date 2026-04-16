@@ -19,9 +19,8 @@ const API_TARGET = 'http://47.113.228.135:7099';
 
 // 合成 tray 图标 + 文字图片
 async function compositeTrayImage(stockData) {
-  const { code, price, changePercent } = stockData;
+  const { code, price, changePercent, increase } = stockData;
   const sign = changePercent >= 0 ? '+' : '';
-  const changeStr = `${sign}${changePercent.toFixed(2)}%`;
 
   // 读取原始 tray 图标
   const resourcePath = app.isPackaged
@@ -66,7 +65,7 @@ async function compositeTrayImage(stockData) {
   ctx.fillText(code, textMarginLeft, textOffsetY);
 
   // 第二行：价格 + 涨跌幅
-  const priceStr = `${price.toFixed(2)}  ${changeStr}`;
+  const priceStr = `${price.toFixed(2)}  ${increase}`;
   ctx.fillStyle = Number(changePercent) > 0 ? '#ff0000' : '#00ff00';
   ctx.fillText(priceStr, textMarginLeft, textOffsetY + lineHeight + offset_y);
 
@@ -89,7 +88,7 @@ function startProxyServer() {
     '600276': '恒瑞医药', '300750': '宁德时代', '601398': '工商银行',
     '601988': '中国银行', '601939': '建设银行', '601288': '农业银行',
     '600030': '中信证券', '600016': '民生银行', '600000': '浦发银行',
-    '601166': '兴业银行',
+    '601166': '兴业银行', '601099': '太平洋', '601991': '大唐发电',
   };
 
   // 格式化股票代码
@@ -290,9 +289,8 @@ ipcMain.handle('show-notification', async (event, { title, body }) => {
 ipcMain.handle('update-dock', async (event, stockData) => {
   if (!tray) return false;
 
-  const { code, price, changePercent } = stockData;
+  const { code, price, changePercent, increase } = stockData;
   const sign = changePercent >= 0 ? '+' : '';
-  const changeStr = `${sign}${changePercent.toFixed(2)}%`;
 
   // 合成图标 + 文字图片
   const buffer = await compositeTrayImage(stockData);
@@ -303,7 +301,7 @@ ipcMain.handle('update-dock', async (event, stockData) => {
 
   // Dock badge: 仅在 dock 可用时设置
   if (process.platform === 'darwin' && app.dock && typeof app.dock.setBadge === 'function') {
-    app.dock.setBadge(changeStr);
+    app.dock.setBadge(increase);
   }
 
   return true;
